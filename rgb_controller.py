@@ -13,9 +13,21 @@ def start_openrgb_server():
         )
         print("Starting OpenRGB server...")
 
-        time.sleep(5)
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            try:
+                OpenRGBClient(address="127.0.0.1", port=6742)
+                print(f"OpenRGB server started successfully after {attempt+1} attempts")
+                return True
+            except Exception:
+                print(f"Waiting for server to start (attempt {attempt+1}/{max_attempts})...")
+                time.sleep(1)
+        
+        print("Failed to connect to OpenRGB server after maximum attempts")
+        return False
     except Exception as e:
         print(f"Failed to start OpenRGB server: {e}")
+        return False
 
 
 def get_cpu_temperature():
@@ -54,38 +66,16 @@ def temperature_to_rgb(temp):
         return 255, 0, 0  # Red
 
 
-def apply_rgb_color_cpu(red, green, blue, prev_rgb):
+def apply_rgb_color(client: OpenRGBClient, red, green, blue, prev_rgb, device_type=None):
     """
-    Apply RGB color to ASUS Aura LED Controller if it differs from the current color.
-    """
-    if (red, green, blue) == prev_rgb:
-        return prev_rgb
-
-    hex_color = f"{red:02x}{green:02x}{blue:02x}"
-    try:
-        subprocess.run(
-            [
-                "liquidctl",
-                "--device",
-                "0",
-                "set",
-                "sync",
-                "color",
-                "static",
-                hex_color,
-            ],
-            check=True,
-        )
-        print(f"Aura RGB set to R={red}, G={green}, B={blue} (#{hex_color})")
-    except subprocess.CalledProcessError as e:
-        print(f"Error setting Aura RGB color: {e}")
-    return red, green, blue
-
-
-def apply_rgb_color_mouse(client: OpenRGBClient, red, green, blue, prev_rgb):
-    """
-    Apply RGB color to G02 Gaming HERO Mouse if it differs from the current color.
-
+    Apply RGB color to devices of a specific type or all devices if type is None.
+    
+    Args:
+        client: OpenRGBClient instance
+        red, green, blue: RGB color values
+        prev_rgb: Previous RGB values
+        device_type: DeviceType to filter devices (optional)
+        
     Returns:
         tuple: Updated RGB values.
     """
@@ -93,50 +83,63 @@ def apply_rgb_color_mouse(client: OpenRGBClient, red, green, blue, prev_rgb):
         return prev_rgb
 
     rgb_color = RGBColor(red, green, blue)
+    
+    target_devices = client.devices
+    if device_type is not None:
+        target_devices = client.get_devices_by_type(device_type)
+        if not target_devices:
+            print(f"No devices of type {device_type} found")
+            return prev_rgb
 
-    for device in client.devices:
+    for device in target_devices:
         print(f"Targeting device: {device.name}")
         try:
-            if "G502" in device.name:  # Handle Logitech mouse
-                if "Static" in [mode.name for mode in device.modes]:
-                    device.set_mode("Static")
-                    device.set_color(rgb_color)
-                    print(f"{device.name} RGB set to R={red}, G={green}, B={blue}")
-                else:
-                    print(f"Static mode not available for {device.name}")
+            available_modes = [mode.name for mode in device.modes]
+            if "Static" in available_modes:
+                device.set_mode("Static")
+                device.set_color(rgb_color)
+                print(f"{device.name} RGB set to R={red}, G={green}, B={blue}")
+            else:
+                print(f"Static mode not available for {device.name}. Available modes: {available_modes}")
 
         except Exception as e:
             print(f"Error applying color to {device.name}: {e}")
-    return red, green, blue
+    
+    return (red, green, blue)
 
 
 if __name__ == "__main__":
-    prev_aura_rgb = (-1, -1, -1)  # Track previous Aura RGB color
-    prev_mouse_rgb = (-1, -1, -1)  # Track previous mouse RGB color
-    start_openrgb_server()
-    client = OpenRGBClient(address="127.0.0.1", port=6742)
-    for device in client.devices:
-        print(f"Device Name: {device.name}")
-        print(f"Device Type: {device.type}")
-        print(f"Modes: {device.modes}")
-
-    print(client.get_devices_by_type(DeviceType.COOLER))
-    motherboard = client.get_devices_by_type(DeviceType.MOTHERBOARD)[0]
-    print(client.get_devices_by_type(DeviceType.MOUSE))
-
-    motherboard.colors[0] = RGBColor(255, 0, 0)
-    print(motherboard.colors)
-    client.show()
-
-    while True:
-        cpu_temp = get_cpu_temperature()
-        if cpu_temp is not None:
-            print(f"CPU Temperature: {cpu_temp}°C")
-            red, green, blue = temperature_to_rgb(cpu_temp)
-            prev_aura_rgb = apply_rgb_color_cpu(red, green, blue, prev_aura_rgb)
-            prev_mouse_rgb = apply_rgb_color_mouse(
-                client, red, green, blue, prev_mouse_rgb
-            )
-        else:
-            print("Unable to read CPU temperature.")
-        time.sleep(2)  # Adjust the interval as needed
+    prev_rgb = (-1, -1, -1) 
+    
+    if not start_openrgb_server():
+        print("Failed to start OpenRGB server. Exiting.")
+        exit(1)
+    
+    try:
+        client = OpenRGBClient(address="127.0.0.1", port=6742)
+        
+        print("\nDetected devices:")
+        for device in client.devices:
+            print(f"Device: {device.name} (Type: {device.type})")
+            print(f"  Available modes: {[mode.name for mode in device.modes]}")
+            print(f"  Zones: {len(device.zones)}")
+            print(f"  LEDs: {len(device.leds)}")
+            print()
+        
+        while True:
+            try:
+                cpu_temp = get_cpu_temperature()
+                if cpu_temp is not None:
+                    print(f"CPU Temperature: {cpu_temp}°C")
+                    red, green, blue = temperature_to_rgb(cpu_temp)
+                    prev_rgb = apply_rgb_color(client, red, green, blue, prev_rgb)
+                else:
+                    print("Unable to read CPU temperature.")
+            except Exception as e:
+                print(f"Error in main loop: {e}")
+            
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\nExiting RGB controller...")
+    except Exception as e:
+        print(f"Fatal error: {e}")

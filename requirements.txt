@@ -1,1 +1,1 @@
-openrgb-python==0.3.3
+openrgb-python
