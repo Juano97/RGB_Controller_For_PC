@@ -1,8 +1,20 @@
 import time
 import subprocess
+import os
+import logging
+from datetime import datetime
 from openrgb import OpenRGBClient
 from openrgb.utils import RGBColor, DeviceType
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("/tmp/rgb_controller.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("RGBController")
 
 def start_openrgb_server():
     try:
@@ -11,24 +23,79 @@ def start_openrgb_server():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print("Starting OpenRGB server...")
+        logger.info("Starting OpenRGB server...")
 
         max_attempts = 10
         for attempt in range(max_attempts):
             try:
                 OpenRGBClient(address="127.0.0.1", port=6742)
-                print(f"OpenRGB server started successfully after {attempt+1} attempts")
+                logger.info(f"OpenRGB server started successfully after {attempt+1} attempts")
                 return True
             except Exception:
-                print(f"Waiting for server to start (attempt {attempt+1}/{max_attempts})...")
+                logger.info(f"Waiting for server to start (attempt {attempt+1}/{max_attempts})...")
                 time.sleep(1)
         
-        print("Failed to connect to OpenRGB server after maximum attempts")
+        logger.error("Failed to connect to OpenRGB server after maximum attempts")
         return False
     except Exception as e:
-        print(f"Failed to start OpenRGB server: {e}")
+        logger.error(f"Failed to start OpenRGB server: {e}")
         return False
 
+def get_rgb_client():
+    """
+    Create and return an OpenRGBClient instance.
+    Handles connection errors and retries.
+    """
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            client = OpenRGBClient(address="127.0.0.1", port=6742)
+            return client
+        except Exception as e:
+            logger.warning(f"Connection attempt {attempt+1}/{max_attempts} failed: {e}")
+            if attempt < max_attempts - 1:
+                logger.info("Retrying in 2 seconds...")
+                time.sleep(2)
+    
+    return None
+
+def refresh_device_list(client):
+    """
+    Refresh the device list to detect newly connected devices.
+    """
+    try:
+        client.update_devices()
+        return True
+    except Exception as e:
+        logger.error(f"Error refreshing device list: {e}")
+        return False
+
+def detect_sleep_wake(last_timestamp):
+    """
+    Detect if system has gone through sleep/wake cycle by checking time difference.
+    Returns True if a sleep/wake cycle is detected, False otherwise.
+    """
+    current_time = datetime.now()
+    time_diff = (current_time - last_timestamp).total_seconds()
+    
+    if time_diff > 30:
+        logger.info(f"Sleep/wake cycle detected. Time gap: {time_diff:.2f} seconds")
+        return True
+    return False
+
+def restart_openrgb_server():
+    """
+    Kill existing OpenRGB server process and start a new one.
+    """
+    try:
+        subprocess.run(["pkill", "-f", "openRGB"], stderr=subprocess.DEVNULL)
+        logger.info("Killed existing OpenRGB processes")
+        time.sleep(1)
+        
+        return start_openrgb_server()
+    except Exception as e:
+        logger.error(f"Error restarting OpenRGB server: {e}")
+        return False
 
 def get_cpu_temperature():
     """
@@ -42,9 +109,8 @@ def get_cpu_temperature():
                 temp = float(line.split()[1].replace("+", "").replace("°C", ""))
                 return temp
     except Exception as e:
-        print(f"Error reading sensors: {e}")
+        logger.error(f"Error reading sensors: {e}")
     return None
-
 
 def temperature_to_rgb(temp):
     """
@@ -64,7 +130,6 @@ def temperature_to_rgb(temp):
         return 255, 127, 0  # Orange-red
     else:
         return 255, 0, 0  # Red
-
 
 def apply_rgb_color(client: OpenRGBClient, red, green, blue, prev_rgb, device_type=None):
     """
@@ -88,58 +153,94 @@ def apply_rgb_color(client: OpenRGBClient, red, green, blue, prev_rgb, device_ty
     if device_type is not None:
         target_devices = client.get_devices_by_type(device_type)
         if not target_devices:
-            print(f"No devices of type {device_type} found")
+            logger.warning(f"No devices of type {device_type} found")
             return prev_rgb
 
     for device in target_devices:
-        print(f"Targeting device: {device.name}")
+        logger.debug(f"Targeting device: {device.name}")
         try:
             available_modes = [mode.name for mode in device.modes]
             if "Static" in available_modes:
                 device.set_mode("Static")
                 device.set_color(rgb_color)
-                print(f"{device.name} RGB set to R={red}, G={green}, B={blue}")
+                logger.debug(f"{device.name} RGB set to R={red}, G={green}, B={blue}")
             else:
-                print(f"Static mode not available for {device.name}. Available modes: {available_modes}")
+                logger.warning(f"Static mode not available for {device.name}. Available modes: {available_modes}")
 
         except Exception as e:
-            print(f"Error applying color to {device.name}: {e}")
+            logger.error(f"Error applying color to {device.name}: {e}")
     
     return (red, green, blue)
 
+def print_device_info(client):
+    """
+    Print information about all detected devices.
+    """
+    logger.info("\nDetected devices:")
+    for device in client.devices:
+        logger.info(f"Device: {device.name} (Type: {device.type})")
+        logger.info(f"  Available modes: {[mode.name for mode in device.modes]}")
+        logger.info(f"  Zones: {len(device.zones)}")
+        logger.info(f"  LEDs: {len(device.leds)}")
+        logger.info("")
 
 if __name__ == "__main__":
-    prev_rgb = (-1, -1, -1) 
+    logger.info("RGB Controller starting up...")
+    prev_rgb = (-1, -1, -1)
+    last_check_time = datetime.now()
     
     if not start_openrgb_server():
-        print("Failed to start OpenRGB server. Exiting.")
+        logger.error("Failed to start OpenRGB server. Exiting.")
         exit(1)
     
-    try:
-        client = OpenRGBClient(address="127.0.0.1", port=6742)
-        
-        print("\nDetected devices:")
-        for device in client.devices:
-            print(f"Device: {device.name} (Type: {device.type})")
-            print(f"  Available modes: {[mode.name for mode in device.modes]}")
-            print(f"  Zones: {len(device.zones)}")
-            print(f"  LEDs: {len(device.leds)}")
-            print()
-        
-        while True:
+    client = None
+    
+    while True:
+        try:
+            current_time = datetime.now()
+            
+            if detect_sleep_wake(last_check_time):
+                logger.info("System appears to have woken from sleep. Reinitializing...")
+                client = None
+                restart_openrgb_server()
+            
+            last_check_time = current_time
+            
+            if client is None:
+                client = get_rgb_client()
+                if client is None:
+                    logger.warning("Failed to connect to OpenRGB server. Retrying in 5 seconds...")
+                    time.sleep(5)
+                    continue
+                
+                print_device_info(client)
+            
+            refresh_device_list(client)
+            
             try:
                 cpu_temp = get_cpu_temperature()
                 if cpu_temp is not None:
-                    print(f"CPU Temperature: {cpu_temp}°C")
+                    logger.info(f"CPU Temperature: {cpu_temp}°C")
                     red, green, blue = temperature_to_rgb(cpu_temp)
-                    prev_rgb = apply_rgb_color(client, red, green, blue, prev_rgb)
+                    
+                    try:
+                        prev_rgb = apply_rgb_color(client, red, green, blue, prev_rgb)
+                    except Exception as e:
+                        logger.error(f"Error applying RGB color: {e}")
+                        client = None
+                        continue
                 else:
-                    print("Unable to read CPU temperature.")
+                    logger.warning("Unable to read CPU temperature.")
             except Exception as e:
-                print(f"Error in main loop: {e}")
+                logger.error(f"Error in temperature processing: {e}")
             
             time.sleep(2)
-    except KeyboardInterrupt:
-        print("\nExiting RGB controller...")
-    except Exception as e:
-        print(f"Fatal error: {e}")
+            
+        except KeyboardInterrupt:
+            logger.info("\nExiting RGB controller...")
+            break
+        except Exception as e:
+            logger.error(f"Fatal error in main loop: {e}")
+            logger.info("Resetting connection and retrying in 5 seconds...")
+            client = None
+            time.sleep(5)
