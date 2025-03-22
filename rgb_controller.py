@@ -46,7 +46,7 @@ def get_rgb_client():
     Create and return an OpenRGBClient instance.
     Handles connection errors and retries.
     """
-    max_attempts = 3
+    max_attempts = 10
     for attempt in range(max_attempts):
         try:
             client = OpenRGBClient(address="127.0.0.1", port=6742)
@@ -54,21 +54,10 @@ def get_rgb_client():
         except Exception as e:
             logger.warning(f"Connection attempt {attempt+1}/{max_attempts} failed: {e}")
             if attempt < max_attempts - 1:
-                logger.info("Retrying in 2 seconds...")
-                time.sleep(2)
+                logger.info("Retrying in 5 seconds...")
+                time.sleep(5)
     
     return None
-
-def refresh_device_list(client):
-    """
-    Refresh the device list to detect newly connected devices.
-    """
-    try:
-        client.update_devices()
-        return True
-    except Exception as e:
-        logger.error(f"Error refreshing device list: {e}")
-        return False
 
 def detect_sleep_wake(last_timestamp):
     """
@@ -215,7 +204,6 @@ if __name__ == "__main__":
                 
                 print_device_info(client)
             
-            refresh_device_list(client)
             
             try:
                 cpu_temp = get_cpu_temperature()
